@@ -9,7 +9,7 @@ services:
       POSTGRES_PASSWORD: adminpassword
       POSTGRES_DB: taskdb
     ports:
-      - "5433:5432" 
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -23,6 +23,16 @@ services:
     container_name: redis_cache
     ports:
       - "6379:6379"
+
+  # AQUÍ EMPIEZA EL GATEWAY (Debe estar alineado con 'db' y 'redis')
+  api-gateway:
+    build: ./api-gateway
+    container_name: api_gateway
+    ports:
+      - "8000:8000"
+    depends_on:
+      - auth-service
+      - task-service
 
   auth-service:
     build: ./auth-service
