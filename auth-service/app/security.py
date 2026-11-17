@@ -1,14 +1,9 @@
 from passlib.context import CryptContext
 from datetime import datetime, timedelta
 from jose import jwt
+from app.config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
 
-# Configuración de encriptación
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-# Configuración del Token (JWT)
-SECRET_KEY = "super_secret_key_para_el_proyecto_buap"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
 def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
