@@ -1,10 +1,11 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
+from typing import Literal
 
 class UsuarioRegistro(BaseModel):
     nombre: str
     email: EmailStr
-    password: str
-    rol: str = "Miembro"  # Por defecto, pero puede ser Admin o Lider
+    password: str = Field(min_length=6, max_length=72)
+    rol: Literal["Admin", "Lider", "Miembro"] = "Miembro"
 
 class UsuarioLogin(BaseModel):
     email: EmailStr
@@ -13,4 +14,4 @@ class UsuarioLogin(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str
-    rol: str
+    rol: Literal["Admin", "Lider", "Miembro"] = "Miembro"
