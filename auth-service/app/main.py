@@ -30,7 +30,7 @@ def registrar_usuario(user: schemas.UsuarioRegistro, db: Session = Depends(get_d
     db.refresh(nuevo_usuario)
     
     # Generar token automáticamente al registrarse
-    token = security.create_access_token(data={"sub": nuevo_usuario.email, "rol": nuevo_usuario.rol})
+    token = security.create_access_token(data={"sub": nuevo_usuario.email, "id": nuevo_usuario.id, "rol": nuevo_usuario.rol})
     return {"access_token": token, "token_type": "bearer", "rol": nuevo_usuario.rol}
 
 # 2. Endpoint de Login
@@ -46,5 +46,5 @@ def login(user: schemas.UsuarioLogin, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
     
     # Generar token
-    token = security.create_access_token(data={"sub": db_user.email, "rol": db_user.rol})
+    token = security.create_access_token(data={"sub": db_user.email, "id": db_user.id, "rol": db_user.rol})
     return {"access_token": token, "token_type": "bearer", "rol": db_user.rol}
