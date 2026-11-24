@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+import unicodedata
 import httpx
 from jose import jwt, JWTError
 
@@ -22,6 +23,19 @@ ALGORITHM = "HS256"
 # URLs de los microservicios (Docker resuelve estos nombres internamente)
 AUTH_SERVICE_URL = "http://auth-service:8000"
 TASK_SERVICE_URL = "http://task-service:8000"
+PRESENCE_SERVICE_URL = "http://presence-service:8000"
+
+ROLES_VALIDOS = {"admin": "Admin", "lider": "Lider", "miembro": "Miembro"}
+
+def normalizar_rol(rol):
+    """'Líder', 'lider' o 'LIDER' -> 'Lider'. Devuelve None si no es un rol válido.
+    Así el header X-User-Role siempre sale en ASCII (los headers HTTP no admiten
+    acentos) y un rol inventado se rechaza aquí, antes de llegar a los servicios."""
+    if not rol or not isinstance(rol, str):
+        return None
+    limpio = unicodedata.normalize("NFD", rol.strip().lower())
+    limpio = "".join(c for c in limpio if unicodedata.category(c) != "Mn")
+    return ROLES_VALIDOS.get(limpio)
 
 # Función para validar el Token JWT
 def validar_token(token: str):
@@ -57,11 +71,11 @@ async def register_proxy(request: Request):
 # ==========================================
 # RUTAS PROTEGIDAS (Requieren Token JWT)
 # ==========================================
-async def proxy_task_service(request: Request, prefijo: str, path: str):
-    """Valida el token y redirige la petición al task-service.
+async def proxy_servicio(request: Request, base_url: str, nombre: str, prefijo: str, path: str):
+    """Valida el token y redirige la petición al microservicio indicado.
 
-    Conserva el prefijo (/tasks o /projects) porque así están definidas las
-    rutas dentro del task-service.
+    Conserva el prefijo (/tasks, /projects, /notifications, /presence) porque
+    así están definidas las rutas dentro de cada microservicio.
     """
 
     # 1. Obtener el token del Header Authorization
@@ -76,15 +90,17 @@ async def proxy_task_service(request: Request, prefijo: str, path: str):
 
     # El token debe traer el id y el rol del usuario
     id_usuario = usuario_data.get("id")
-    rol = usuario_data.get("rol")
-    if id_usuario is None or not rol:
+    rol = normalizar_rol(usuario_data.get("rol"))
+    if id_usuario is None or not usuario_data.get("rol"):
         raise HTTPException(
             status_code=401,
             detail="El token no trae id o rol. Vuelve a iniciar sesión",
         )
+    if rol is None:
+        raise HTTPException(status_code=401, detail="El token trae un rol no válido")
 
-    # 3. Si el token es válido, redirigir al task-service
-    url = f"{TASK_SERVICE_URL}/{prefijo}/{path}"
+    # 3. Si el token es válido, redirigir al microservicio
+    url = f"{base_url}/{prefijo}/{path}"
     body = await request.body()
 
     # Los headers se construyen DESDE CERO: nunca se reenvían los del cliente.
@@ -109,7 +125,7 @@ async def proxy_task_service(request: Request, prefijo: str, path: str):
             )
     except httpx.RequestError:
         # Aislamiento de fallos: si el microservicio no responde, error controlado
-        raise HTTPException(status_code=503, detail="Task Service no disponible")
+        raise HTTPException(status_code=503, detail=f"{nombre} no disponible")
 
     try:
         contenido = response.json()
@@ -122,16 +138,22 @@ async def proxy_task_service(request: Request, prefijo: str, path: str):
 @app.api_route("/tasks/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def tasks_proxy(request: Request, path: str):
     """Redirige /tasks/... al task-service"""
-    return await proxy_task_service(request, "tasks", path)
+    return await proxy_servicio(request, TASK_SERVICE_URL, "Task Service", "tasks", path)
 
 
 @app.api_route("/projects/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def projects_proxy(request: Request, path: str):
     """Redirige /projects/... al task-service"""
-    return await proxy_task_service(request, "projects", path)
+    return await proxy_servicio(request, TASK_SERVICE_URL, "Task Service", "projects", path)
 
 
 @app.api_route("/notifications/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def notifications_proxy(request: Request, path: str):
     """Redirige /notifications/... (historial) al task-service"""
-    return await proxy_task_service(request, "notifications", path)
+    return await proxy_servicio(request, TASK_SERVICE_URL, "Task Service", "notifications", path)
+
+
+@app.api_route("/presence/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def presence_proxy(request: Request, path: str):
+    """Redirige /presence/... al presence-service"""
+    return await proxy_servicio(request, PRESENCE_SERVICE_URL, "Presence Service", "presence", path)

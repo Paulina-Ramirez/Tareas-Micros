@@ -8,6 +8,9 @@ Piezas:
   2. GestorConexiones: registro {id_usuario: {websockets}} (varias pestañas).
   3. Un único suscriptor global a "tareas:*" (tarea de fondo con reconexión).
   4. Limpieza: el socket se quita del registro al desconectarse o fallar.
+  5. Presencia: avisa al presence-service (por Pub/Sub) cuando un usuario abre
+     su PRIMER WebSocket y cuando cierra el ÚLTIMO. Es secundario: si Redis
+     falla, la conexión del usuario no se ve afectada.
 """
 import asyncio
 import json
@@ -31,6 +34,11 @@ ALGORITHM = os.getenv("ALGORITHM", "HS256")
 
 PATRON_CANALES = "tareas:*"
 
+# Canales que escucha el presence-service
+CANAL_PRESENCIA_CONECTADO = "presencia:conectado"
+CANAL_PRESENCIA_DESCONECTADO = "presencia:desconectado"
+TIMEOUT_PUBLICACION = 2.0  # segundos; la presencia no debe frenar al WebSocket
+
 # Espera entre reintentos de conexión a Redis (crece al doble hasta el máximo)
 ESPERA_INICIAL = 1.0
 ESPERA_MAXIMA = 30.0
@@ -47,16 +55,24 @@ class GestorConexiones:
     def __init__(self) -> None:
         self._conexiones: Dict[int, Set[WebSocket]] = {}
 
-    def registrar(self, id_usuario: int, websocket: WebSocket) -> None:
-        self._conexiones.setdefault(id_usuario, set()).add(websocket)
+    def registrar(self, id_usuario: int, websocket: WebSocket) -> bool:
+        """Registra la conexión. Devuelve True si es la PRIMERA del usuario."""
+        sockets = self._conexiones.setdefault(id_usuario, set())
+        sockets.add(websocket)
+        return len(sockets) == 1
 
-    def quitar(self, id_usuario: int, websocket: WebSocket) -> None:
+    def quitar(self, id_usuario: int, websocket: WebSocket) -> bool:
+        """Quita la conexión. Devuelve True si era la ÚLTIMA del usuario.
+        Si ese socket ya no estaba registrado, devuelve False (así no se
+        avisa dos veces de la misma desconexión)."""
         sockets = self._conexiones.get(id_usuario)
-        if sockets is None:
-            return
+        if sockets is None or websocket not in sockets:
+            return False
         sockets.discard(websocket)
         if not sockets:
             del self._conexiones[id_usuario]
+            return True
+        return False
 
     def total(self) -> int:
         return sum(len(s) for s in self._conexiones.values())
@@ -65,17 +81,49 @@ class GestorConexiones:
         """Envía el mensaje a todas las conexiones del usuario.
         Devuelve a cuántas se entregó. Si un socket está muerto, lo quita."""
         enviados = 0
+        se_quedo_sin_conexiones = False
         for websocket in list(self._conexiones.get(id_usuario, ())):
             try:
                 await websocket.send_json(mensaje)
                 enviados += 1
             except Exception:
                 logger.info("Conexión muerta del usuario %s: se elimina", id_usuario)
-                self.quitar(id_usuario, websocket)
+                if self.quitar(id_usuario, websocket):
+                    se_quedo_sin_conexiones = True
+        if se_quedo_sin_conexiones:
+            await publicar_presencia(CANAL_PRESENCIA_DESCONECTADO, {"id_usuario": id_usuario})
         return enviados
 
 
 gestor = GestorConexiones()
+
+
+# ───────────────────────── Aviso de presencia (Pub/Sub) ─────────────────────────
+# Se crean al arrancar (lifespan), dentro del event loop que los va a usar.
+_publicador: Optional[redis.Redis] = None
+_lock_presencia: Optional[asyncio.Lock] = None
+
+
+def crear_cliente_publicador() -> redis.Redis:
+    # Con timeouts: si Redis se cuelga, la publicación falla rápido
+    return redis.from_url(
+        REDIS_URL, decode_responses=True, socket_connect_timeout=2, socket_timeout=2
+    )
+
+
+async def publicar_presencia(canal: str, datos: dict) -> None:
+    """Avisa al presence-service. NUNCA lanza excepciones: la presencia es
+    secundaria y no debe afectar al WebSocket del usuario. El lock mantiene
+    el orden de los avisos (desconectado → conectado al recargar la página)."""
+    if _publicador is None or _lock_presencia is None:
+        return
+    try:
+        async with _lock_presencia:
+            await asyncio.wait_for(
+                _publicador.publish(canal, json.dumps(datos)), TIMEOUT_PUBLICACION
+            )
+    except Exception as e:
+        logger.warning("No se pudo publicar presencia en %s (%s)", canal, e)
 
 
 # ───────────────────────── Suscriptor global a Redis ─────────────────────────
@@ -157,11 +205,16 @@ async def escuchar_redis() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _publicador, _lock_presencia
+    _publicador = crear_cliente_publicador()
+    _lock_presencia = asyncio.Lock()
     tarea = asyncio.create_task(escuchar_redis())
     yield
     tarea.cancel()
     with suppress(asyncio.CancelledError):
         await tarea
+    await _cerrar(_publicador)
+    _publicador = _lock_presencia = None
 
 
 app = FastAPI(title="Notification Service", lifespan=lifespan)
@@ -177,9 +230,9 @@ def health_check():
 
 
 # ───────────────────────── Autenticación del WebSocket ─────────────────────────
-def identificar_usuario(token: Optional[str], user_id: int) -> int:
+def identificar_usuario(token: Optional[str], user_id: int):
     """Valida el JWT y comprueba que pertenezca al {user_id} de la ruta.
-    Lanza ValueError con el motivo si algo no cuadra."""
+    Devuelve (id, rol). Lanza ValueError con el motivo si algo no cuadra."""
     if not token:
         raise ValueError("Falta el token (usa ?token=<jwt>)")
     try:
@@ -194,7 +247,7 @@ def identificar_usuario(token: Optional[str], user_id: int) -> int:
 
     if id_token != user_id:
         raise ValueError("El token no pertenece a este usuario")
-    return id_token
+    return id_token, payload.get("rol")
 
 
 @app.websocket("/ws/{user_id}")
@@ -208,14 +261,18 @@ async def websocket_endpoint(
     await websocket.accept()
 
     try:
-        id_usuario = identificar_usuario(token, user_id)
+        id_usuario, rol = identificar_usuario(token, user_id)
     except ValueError as e:
         await websocket.close(code=1008, reason=str(e))  # 1008 = violación de política
         return
 
-    gestor.registrar(id_usuario, websocket)
+    es_primera_conexion = gestor.registrar(id_usuario, websocket)
     try:
         await websocket.send_json({"evento": "conectado", "id_usuario": id_usuario})
+        if es_primera_conexion:  # presencia: el usuario acaba de aparecer en línea
+            await publicar_presencia(
+                CANAL_PRESENCIA_CONECTADO, {"id_usuario": id_usuario, "rol": rol}
+            )
         # Se espera al cliente: así se detecta cuando se desconecta.
         # Si manda "ping" (keep-alive) se responde "pong".
         while True:
@@ -227,4 +284,5 @@ async def websocket_endpoint(
     except Exception:
         logger.info("WebSocket del usuario %s terminó con error", id_usuario)
     finally:
-        gestor.quitar(id_usuario, websocket)
+        if gestor.quitar(id_usuario, websocket):  # era su última conexión
+            await publicar_presencia(CANAL_PRESENCIA_DESCONECTADO, {"id_usuario": id_usuario})
