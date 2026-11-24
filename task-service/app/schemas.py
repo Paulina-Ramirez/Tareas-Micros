@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
 from typing import Optional, Literal
 
@@ -61,3 +61,15 @@ class ProyectoResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ───────────────────────── NOTIFICACIONES (historial) ─────────────────────────
+
+class NotificacionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    id_usuario: int
+    mensaje: str
+    leida: bool
+    fecha_creacion: datetime

@@ -129,3 +129,9 @@ async def tasks_proxy(request: Request, path: str):
 async def projects_proxy(request: Request, path: str):
     """Redirige /projects/... al task-service"""
     return await proxy_task_service(request, "projects", path)
+
+
+@app.api_route("/notifications/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def notifications_proxy(request: Request, path: str):
+    """Redirige /notifications/... (historial) al task-service"""
+    return await proxy_task_service(request, "notifications", path)
